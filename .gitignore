@@ -10,3 +10,6 @@ wheels/
 .venv
 .models
 .vandc
+.ipynb_checkpoints
+.jupyter/desktop-workspaces
+Untitled.ipynb

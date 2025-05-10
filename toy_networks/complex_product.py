@@ -2,11 +2,12 @@ import argparse
 import torch as t
 from tqdm import tqdm
 import vandc
+from torch.nn.functional import cross_entropy
 from einops import einsum
 from typing import Tuple
 
 
-def get_train_data(n: int):
+def get_off_diagonal_data(n: int):
     values = t.arange(n)
     i, j = t.meshgrid(values, values, indexing="ij")
     mask = i != j
@@ -15,10 +16,18 @@ def get_train_data(n: int):
     return x, y
 
 
-def get_data(b: int, n: int):
-    x = t.randint(0, n, (b, 2))
-    y = x.sum(-1) % n
+def get_data(n: int):
+    values = t.arange(n)
+    i, j = t.meshgrid(values, values, indexing="ij")
+    x = t.stack([i.flatten(), j.flatten()], dim=1)
+    y = x.sum(dim=1) % n
     return x, y
+
+
+def get_random_data(n: int, b: int):
+    x_all, y_all = get_data(n)
+    indices = t.randperm(n * n)[:b]
+    return x_all[indices], y_all[indices]
 
 
 class ComplexProduct(t.nn.Module):
@@ -27,25 +36,18 @@ class ComplexProduct(t.nn.Module):
 
         self.args = args
         self.embed = 2
-        if not args.fixed_mult:
-            self.embed = args.embed or 2
 
         self.w_embed = t.nn.Parameter(t.randn(args.modulus, self.embed))
-        self.unembed = t.nn.Parameter(t.randn(self.embed, args.modulus))
-        if args.fixed_mult:
-            self.multiply = t.tensor(
-                [[[1, 0], [0, 1]], [[0, 1], [-1, 0]]], dtype=t.float
-            )
-        else:
-            print("Using trainable bilinear layer!")
-            self.multiply = t.nn.Parameter(t.randn([self.embed] * 3))
+        self.multiply = t.tensor(
+            [[[1, 0], [0, 1]], [[0, 1], [-1, 0]]],
+            dtype=t.float,
+        )
+        self.confidence = t.nn.Parameter(t.tensor(1.0))
 
         self.project()
 
     def project(self):
-        self.w_embed.data = self.w_embed.data / self.w_embed.data.norm(
-            dim=-1, keepdim=True
-        )
+        self.w_embed.data.div_(self.w_embed.data.norm(dim=-1, keepdim=True))
 
     def forward(self, x):
         embedded = self.w_embed[x]
@@ -55,7 +57,7 @@ class ComplexProduct(t.nn.Module):
             self.multiply,
             "b i, b j, i j k -> b k",
         )
-        return mult @ self.unembed
+        return mult @ self.w_embed.T
 
 
 def compute_loss(model, x, y):
@@ -65,73 +67,75 @@ def compute_loss(model, x, y):
     return loss, accuracy
 
 
-def run(args):
-    t.manual_seed(args.seed)
+class ComplexProductExperiment:
+    def __init__(self, args):
+        t.manual_seed(args.seed)
 
-    vandc.init(args)
-    x_train, y_train = get_train_data(args.modulus)
-    x_test, y_test = get_data(1024, args.modulus)
-    model = ComplexProduct(args)
+        if args.n_train is None:
+            self.x_train, self.y_train = get_off_diagonal_data(args.modulus)
+        else:
+            self.x_train, self.y_train = get_random_data(args.modulus, args.n_train)
+        self.x_test, self.y_test = get_data(args.modulus)
+        self.model = ComplexProduct(args)
 
-    optimizer = t.optim.Adam(model.parameters(), lr=args.lr)
+        self.optimizer = t.optim.SGD(self.model.parameters(), lr=args.lr)
 
-    embedding_history = []
+    def run(self, log=False):
+        self.embedding_history = []
 
-    mult_decay = args.mult_decay
+        for step in tqdm(range(args.steps)):
+            self.model.train()
+            self.optimizer.zero_grad()
+            train_loss, train_acc = compute_loss(self.model, self.x_train, self.y_train)
 
-    for step in tqdm(range(args.steps)):
-        model.train()
-        optimizer.zero_grad()
-        train_loss, train_acc = compute_loss(model, x_train, y_train)
+            train_loss.backward()
+            self.optimizer.step()
+            self.model.project()
 
-        # Add weight decay for multiply parameter if enabled
-        if mult_decay > 0 and not args.fixed_mult:
-            mult_norm = model.multiply.norm()
-            train_loss = train_loss + mult_decay * mult_norm
+            self.model.eval()
+            with t.no_grad():
+                test_loss, test_acc = compute_loss(self.model, self.x_test, self.y_test)
 
-        train_loss.backward()
-        optimizer.step()
-        model.project()
+            self.embedding_history.append(self.model.w_embed.data.clone())
 
-        model.eval()
-        with t.no_grad():
-            test_loss, test_acc = compute_loss(model, x_test, y_test)
+            if log:
+                d = {
+                    "train_loss": train_loss.item(),
+                    "test_loss": test_loss.item(),
+                    "train_accuracy": train_acc.item(),
+                    "test_accuracy": test_acc.item(),
+                }
+                vandc.log(d)
 
-        embedding_history.append(model.w_embed.data.clone())
-
-        d = {
-            "train_loss": train_loss.item(),
-            "train_accuracy": train_acc.item(),
-            "test_loss": test_loss.item(),
-            "test_accuracy": test_acc.item(),
-        }
-        vandc.log(d)
-
-    t.save(
-        {
-            "model": model.state_dict(),
-            "embedding_history": t.stack(embedding_history),
-        },
-        f".models/{vandc.run_name()}.pt",
-    )
+    def save(self, name: str):
+        t.save(
+            {
+                "model": self.model.state_dict(),
+                "embedding_history": t.stack(self.embedding_history),
+            },
+            f".models/{vandc.run_name()}.pt",
+        )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--modulus", type=int, default=12)
-    parser.add_argument("--lr", type=float, default=0.01)
-    parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--n_train", type=int)
+    parser.add_argument("--lr", type=float, default=1)
+    parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--fixed-mult", type=bool, action=argparse.BooleanOptionalAction
-    )
-    parser.add_argument("--embed", type=int)
-    parser.add_argument(
-        "--mult-decay",
-        type=float,
-        default=0.1,
-        help="Weight decay coefficient for multiply parameter",
-    )
     args = parser.parse_args()
 
-    run(args)
+    vandc.init(args)
+    experiment = ComplexProductExperiment(args)
+    experiment.run(log=True)
+    experiment.save(name=vandc.run_name())
+    vandc.commit()
+
+    df = vandc.fetch(vandc.run_name())
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    sns.lineplot(data=df, x="step", y="test_accuracy")
+    sns.lineplot(data=df, x="step", y="train_loss")
+    plt.show()
