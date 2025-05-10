@@ -69,21 +69,32 @@ def compute_loss(model, x, y):
 
 class ComplexProductExperiment:
     def __init__(self, args):
+        self.args = args
         t.manual_seed(args.seed)
+
+        self.model = ComplexProduct(args)
 
         if args.n_train is None:
             self.x_train, self.y_train = get_off_diagonal_data(args.modulus)
         else:
             self.x_train, self.y_train = get_random_data(args.modulus, args.n_train)
         self.x_test, self.y_test = get_data(args.modulus)
-        self.model = ComplexProduct(args)
 
         self.optimizer = t.optim.SGD(self.model.parameters(), lr=args.lr)
 
-    def run(self, log=False):
+    def get_test_accuracy(self):
+        self.model.eval()
+        with t.no_grad():
+            _, test_acc = compute_loss(self.model, self.x_test, self.y_test)
+        return test_acc.item()
+
+    def log(self, d):
+        vandc.log(d)
+
+    def run(self):
         self.embedding_history = []
 
-        for step in tqdm(range(args.steps)):
+        for step in range(self.args.steps):
             self.model.train()
             self.optimizer.zero_grad()
             train_loss, train_acc = compute_loss(self.model, self.x_train, self.y_train)
@@ -98,14 +109,13 @@ class ComplexProductExperiment:
 
             self.embedding_history.append(self.model.w_embed.data.clone())
 
-            if log:
-                d = {
-                    "train_loss": train_loss.item(),
-                    "test_loss": test_loss.item(),
-                    "train_accuracy": train_acc.item(),
-                    "test_accuracy": test_acc.item(),
-                }
-                vandc.log(d)
+            d = {
+                "train_loss": train_loss.item(),
+                "test_loss": test_loss.item(),
+                "train_accuracy": train_acc.item(),
+                "test_accuracy": test_acc.item(),
+            }
+            self.log(d)
 
     def save(self, name: str):
         t.save(
@@ -123,12 +133,12 @@ if __name__ == "__main__":
     parser.add_argument("--n_train", type=int)
     parser.add_argument("--lr", type=float, default=1)
     parser.add_argument("--steps", type=int, default=100)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=43)
     args = parser.parse_args()
 
     vandc.init(args)
     experiment = ComplexProductExperiment(args)
-    experiment.run(log=True)
+    experiment.run()
     experiment.save(name=vandc.run_name())
     vandc.commit()
 
