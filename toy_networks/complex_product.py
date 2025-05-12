@@ -1,3 +1,4 @@
+# %%
 import argparse
 import torch as t
 from tqdm import tqdm
@@ -5,8 +6,9 @@ import vandc
 from torch.nn.functional import cross_entropy
 from einops import einsum
 from typing import Tuple
+from toy_networks.util import compute_loss
 
-
+# %%
 def get_off_diagonal_data(n: int):
     values = t.arange(n)
     i, j = t.meshgrid(values, values, indexing="ij")
@@ -14,7 +16,6 @@ def get_off_diagonal_data(n: int):
     x = t.stack([i[mask], j[mask]], dim=1)
     y = x.sum(dim=1) % n
     return x, y
-
 
 def get_data(n: int):
     values = t.arange(n)
@@ -30,6 +31,7 @@ def get_random_data(n: int, b: int):
     return x_all[indices], y_all[indices]
 
 
+# %%
 class ComplexProduct(t.nn.Module):
     def __init__(self, args):
         super().__init__()
@@ -58,13 +60,6 @@ class ComplexProduct(t.nn.Module):
             "b i, b j, i j k -> b k",
         )
         return mult @ self.w_embed.T
-
-
-def compute_loss(model, x, y):
-    logits = model(x)
-    loss = t.nn.functional.cross_entropy(logits, y)
-    accuracy = (logits.argmax(dim=-1) == y).float().mean()
-    return loss, accuracy
 
 
 class ComplexProductExperiment:
@@ -147,5 +142,4 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
     sns.lineplot(data=df, x="step", y="test_accuracy")
-    sns.lineplot(data=df, x="step", y="train_loss")
     plt.show()
